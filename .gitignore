@@ -6,6 +6,9 @@ intel5/
 
 # ===== YOLO 가중치 =====
 *.pt
+# runs 폴더 안의 학습 결과(.pt)는 추적
+!runs/**/
+!runs/**/*.pt
 
 # ===== 이미지 데이터 (원본/가공/depth) =====
 raw_captures/
