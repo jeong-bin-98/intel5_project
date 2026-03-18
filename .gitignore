@@ -1,0 +1,34 @@
+# ===== Python 가상환경 =====
+intel5/
+
+# ===== SAM 모델 가중치 (매우 큼) =====
+*.pth
+
+# ===== YOLO 가중치 =====
+*.pt
+
+# ===== 이미지 데이터 (원본/가공/depth) =====
+raw_captures/
+cleaned_images/
+new_images/
+
+# ===== 학습 데이터셋 & 결과 =====
+dataset/
+runs/
+
+# ===== Python 캐시 =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ===== OS & IDE =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
