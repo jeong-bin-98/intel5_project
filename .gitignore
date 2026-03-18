@@ -12,9 +12,8 @@ raw_captures/
 cleaned_images/
 new_images/
 
-# ===== 학습 데이터셋 & 결과 =====
+# ===== 학습 데이터셋 =====
 dataset/
-runs/
 
 # ===== Python 캐시 =====
 __pycache__/
