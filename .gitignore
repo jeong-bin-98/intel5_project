@@ -1,0 +1,50 @@
+# ===== Python 가상환경 =====
+intel5/
+robot/indyenv/
+
+# ===== 모델 가중치 =====
+models/*.pth
+models/*.pt
+*.pth
+*.pt
+# runs 폴더 전체 무시 (학습 과정에서 찍힌 원본 소켓/배경 사진 유출 방지)
+runs/
+
+# ===== 이미지 데이터 (원본/가공/depth) =====
+data
+
+
+# ===== 학습 데이터셋 =====
+data/dataset/
+
+# ===== 캘리브레이션 데이터 =====
+config/calibration_data/
+aruco_marker_*.png
+
+# ===== Python 캐시 =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ===== OS & IDE =====
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/
+
+# ===== 자료 정리 =====
+video/
+
+# ===== 기타 및 보안 =====
+*.log
+.env
+.env.*
+secret.json
+credentials.json
