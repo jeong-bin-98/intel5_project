@@ -1,22 +1,27 @@
 # ===== Python 가상환경 =====
 intel5/
+robot/indyenv/
 
-# ===== SAM 모델 가중치 (매우 큼) =====
+# ===== 모델 가중치 =====
+models/*.pth
+models/*.pt
 *.pth
-
-# ===== YOLO 가중치 =====
 *.pt
 # runs 폴더 안의 학습 결과(.pt)는 추적
 !runs/**/
 !runs/**/*.pt
 
 # ===== 이미지 데이터 (원본/가공/depth) =====
-raw_captures/
-cleaned_images/
-new_images/
+data/raw_captures/
+data/cleaned_images/
+data/new_images/
 
 # ===== 학습 데이터셋 =====
-dataset/
+data/dataset/
+
+# ===== 캘리브레이션 데이터 =====
+config/calibration_data/
+aruco_marker_*.png
 
 # ===== Python 캐시 =====
 __pycache__/
@@ -34,3 +39,10 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+.claude/
+
+# ===== 자료 정리 =====
+영상 및 관련 자료/
+
+# ===== 기타 =====
+*.log

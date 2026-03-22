@@ -2,8 +2,8 @@
 # 이 파일은 step4_train_yolo.py 에서 자동으로 참조됩니다.
 
 # 경로 설정 (절대 경로로 바꾸면 더 안전)
-train: dataset/images/train
-val: dataset/images/val
+train: data/dataset/images/train
+val: data/dataset/images/val
 
 # 클래스 수
 nc: 2

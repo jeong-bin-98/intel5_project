@@ -1,90 +1,106 @@
-# 🔌 전기기능사 릴레이 소켓 (8핀/12핀) 자동 라벨링 파이프라인
+# 릴레이 소켓 3D Bin-Picking 시스템
 
-## 왜 이 방법을 쓰는가?
+RealSense D435i + YOLOv8 + Indy7 기반 소켓(8핀/12핀) 자동 빈픽킹 시스템
 
-릴레이 소켓(MY2 8핀, MY4 14핀 등)은 일반 AI 모델이 학습한 적 없는 **산업용 특수 부품**입니다.
-→ "socket"이라고 텍스트 프롬프트를 줘도 Grounded SAM/DINO가 못 찾음
-→ **직접 소량 라벨링 → 학습 → 자동 확장** 전략이 가장 현실적
-
-## 3단계 부트스트래핑 전략
+## 시스템 개요
 
 ```
-[1단계] D435 depth로 배경 제거 + SAM 클릭 라벨링 (50~100장)
-   ↓
-[2단계] YOLOv8 1차 학습 (소량 데이터로 모델 생성)
-   ↓
-[3단계] 1차 모델로 나머지 이미지 자동 라벨링 (Pseudo-labeling)
-   ↓
-[반복] 자동 라벨 검수 → 2차 학습 → 더 정확한 모델
+카메라(D435i) → YOLOv8 탐지 → 3D 좌표 계산 → 표면 법선 추정 → 접근 벡터 → Indy7 픽앤플레이스
 ```
 
-## 환경 설정
+## 프로젝트 구조
+
+```
+Intel5/
+├── config/                         # 설정
+│   ├── paths.py                    # 경로 설정
+│   ├── robot_config.py             # Indy7 로봇 설정 (IP, 속도, 캘리브레이션)
+│   └── calibration_data/           # Hand-eye 캘리브레이션 데이터 (gitignore)
+│
+├── src/                            # 소스 코드
+│   ├── detection/                  # 탐지 & 빈픽킹
+│   │   ├── binpicking_3d.py        # 3D 탐지 + 빈픽킹 메인 시스템
+│   │   └── test_detect.py          # 실시간 탐지 테스트
+│   │
+│   ├── pipeline/                   # 데이터 수집 & 학습 파이프라인
+│   │   ├── step1_capture.py        # D435 RGB+Depth 촬영
+│   │   ├── step2_depth_mask.py     # Depth 기반 배경 제거
+│   │   ├── step3_sam_labeler.py    # SAM 클릭 라벨링
+│   │   ├── step3_1_auto_labeler.py # 자동 라벨러
+│   │   ├── step4_train_yolo.py     # YOLOv8 학습
+│   │   └── step5_pseudo_label.py   # Pseudo-labeling 자동 확장
+│   │
+│   ├── robot/                      # 로봇 제어
+│   │   └── indy_controller.py      # Indy7 래퍼 (픽/플레이스/진공)
+│   │
+│   └── calibration/                # 캘리브레이션
+│       └── hand_eye_calibration.py # Hand-Eye 캘리브레이션 (ArUco)
+│
+├── robot/                          # Indy7 SDK & 예제
+│   ├── indy_utils/                 # IndyDCP 클라이언트 라이브러리
+│   ├── src/                        # 기존 로봇 예제 코드
+│   └── 250213/                     # 추가 예제
+│
+├── models/                         # 모델 가중치 (gitignore)
+├── data/                           # 이미지 데이터 (gitignore)
+├── runs/                           # YOLO 학습 결과
+└── dataset.yaml                    # YOLOv8 데이터셋 설정 (8pin, 12pin)
+```
+
+## 실행 방법
+
+### 1. 데이터 수집 & 학습
 
 ```bash
-# 1. 가상환경 만들기
-python -m venv binpick
-source binpick/bin/activate  # Windows: binpick\Scripts\activate
+# 이미지 촬영
+python src/pipeline/step1_capture.py
 
-# 2. 필수 패키지 설치
-pip install pyrealsense2          # D435 카메라 드라이버
-pip install opencv-python          # 이미지 처리
-pip install numpy                  # 수치 연산
-pip install ultralytics            # YOLOv8 (학습 + 추론)
-pip install segment-anything       # Meta SAM (세그멘테이션)
-pip install torch torchvision      # PyTorch (SAM/YOLO 공통)
-pip install matplotlib             # 시각화
+# 배경 제거
+python src/pipeline/step2_depth_mask.py
 
-# 3. SAM 모델 가중치 다운로드 (한 번만)
-wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth
+# SAM 라벨링
+python src/pipeline/step3_sam_labeler.py
+
+# YOLOv8 학습
+python src/pipeline/step4_train_yolo.py
+
+# Pseudo-labeling 확장
+python src/pipeline/step5_pseudo_label.py
 ```
 
-## 폴더 구조
+### 2. 3D 탐지 & 빈픽킹
 
-```
-bin_picking_labeling/
-├── README.md                  ← 지금 이 파일
-├── step1_capture.py           ← D435로 이미지 촬영
-├── step2_depth_mask.py        ← depth로 배경 제거
-├── step3_sam_labeler.py       ← SAM 클릭 라벨링 도구
-├── step4_train_yolo.py        ← YOLOv8 1차 학습
-├── step5_pseudo_label.py      ← 자동 라벨링 (Pseudo-labeling)
-├── sam_vit_h_4b8939.pth       ← SAM 가중치 (다운로드)
-├── dataset/
-│   ├── images/
-│   │   ├── train/             ← 학습용 이미지
-│   │   └── val/               ← 검증용 이미지
-│   └── labels/
-│       ├── train/             ← 학습용 라벨 (YOLO txt)
-│       └── val/               ← 검증용 라벨
-└── dataset.yaml               ← YOLOv8 데이터셋 설정
+```bash
+# 실시간 3D 탐지 (시각화)
+python src/detection/binpicking_3d.py
+
+# 빈픽킹 모드 (시뮬레이션)
+python src/detection/binpicking_3d.py --pick
+
+# 빈픽킹 모드 (실제 Indy7 연결)
+python src/detection/binpicking_3d.py --pick --robot
 ```
 
-## 각 단계 상세 설명
+### 3. Hand-Eye 캘리브레이션
 
-### 1단계: 이미지 촬영 + depth 배경 제거 + SAM 라벨링
+```bash
+# ArUco 마커 생성 (인쇄 후 그리퍼에 부착)
+python src/calibration/hand_eye_calibration.py --generate-marker
 
-**목표**: 50~100장의 정확한 라벨 데이터 확보
+# 캘리브레이션 데이터 수집 (로봇 연결)
+python src/calibration/hand_eye_calibration.py --collect --robot
 
-D435 카메라는 일반 RGB 사진 + depth(거리) 정보를 동시에 줍니다.
-이 depth를 활용하면:
-- 작업대까지 거리: 약 80cm → depth > 0.7m인 픽셀은 전부 배경
-- 소켓까지 거리: 약 50cm → 0.2m < depth < 0.7m인 픽셀만 전경(소켓)
+# 변환 행렬 계산
+python src/calibration/hand_eye_calibration.py --calibrate
 
-이렇게 배경을 날린 깨끗한 이미지에서 SAM으로 클릭 한 번 하면
-소켓 윤곽이 자동으로 잡히고, 사람은 "8pin" / "12pin"만 지정하면 됩니다.
+# 결과 검증
+python src/calibration/hand_eye_calibration.py --verify
+```
 
-### 2단계: YOLOv8 1차 학습
+## 환경
 
-**목표**: 소량 데이터로 1차 탐지 모델 생성
-
-50~100장이 적어 보이지만, 클래스가 2개뿐이고 크기 차이가 명확해서
-YOLOv8n(nano) 모델로도 충분히 높은 정확도가 나옵니다.
-학습 시간도 GPU 있으면 5~10분, CPU로도 30분 내외입니다.
-
-### 3단계: Pseudo-labeling (자동 라벨 확장)
-
-**목표**: 수백~수천 장으로 데이터 확장
-
-1차 모델이 새 이미지를 추론 → confidence 80% 이상인 결과만 자동 라벨로 저장
-→ 사람이 빠르게 검수(틀린 것만 삭제) → 2차 학습
-→ 반복할수록 모델이 좋아지고, 라벨링 속도도 빨라짐
+- Python 3.12 + CUDA 12.4
+- Intel RealSense D435i (pyrealsense2)
+- YOLOv8 (ultralytics)
+- Neuromeka Indy7 (IndyDCP)
+- OpenCV, NumPy, SciPy, SAM
