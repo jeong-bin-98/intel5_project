@@ -130,13 +130,13 @@ def estimate_surface_normal(depth_image, cx, cy, intrinsics,
     # 유효 depth 필터
     valid = (depths > DEPTH_MIN_MM) & (depths < DEPTH_MAX_MM)
     if valid.sum() < 10:
-        return (0, 0, -1), 0.0, 0.0, 0.0
+        return (0, 0, -1), 0.0, 0.0, 0.0, (0.0, 0.0, 0.0)
 
     # depth outlier 제거: 중앙값 ± 20mm 이내만 (바닥 vs 물체 분리)
     med_depth = np.median(depths[valid])
     valid = valid & (np.abs(depths - med_depth) < 20)
     if valid.sum() < 10:
-        return (0, 0, -1), 0.0, 0.0, 0.0
+        return (0, 0, -1), 0.0, 0.0, 0.0, (0.0, 0.0, 0.0)
 
     px_v = px_flat[valid].astype(np.float64)
     py_v = py_flat[valid].astype(np.float64)
@@ -149,9 +149,40 @@ def estimate_surface_normal(depth_image, cx, cy, intrinsics,
 
     points = np.column_stack([x_3d, y_3d, z_3d])
 
-    # PCA: 공분산 행렬의 고유벡터 계산
-    centroid = points.mean(axis=0)
-    centered = points - centroid
+    # --- RANSAC 평면 피팅 (NumPy 기반) ---
+    num_points = points.shape[0]
+    best_inliers = np.ones(num_points, dtype=bool)
+
+    if num_points >= 3:
+        max_inliers = 0
+        n_iters = min(100, num_points * 2)
+        np.random.seed(42)
+        distance_threshold = 3.0  # 평면 위아래 3mm 이내면 Inlier 인정
+
+        for _ in range(n_iters):
+            sample_idx = np.random.choice(num_points, 3, replace=False)
+            p1, p2, p3 = points[sample_idx]
+
+            v1 = p2 - p1
+            v2 = p3 - p1
+            n = np.cross(v1, v2)
+            norm = np.linalg.norm(n)
+            if norm < 1e-6:
+                continue
+            n = n / norm
+
+            distances = np.abs(np.dot(points - p1, n))
+            inlier_mask = distances < distance_threshold
+            inlier_count = np.sum(inlier_mask)
+
+            if inlier_count > max_inliers:
+                max_inliers = inlier_count
+                best_inliers = inlier_mask
+
+    # RANSAC으로 걸러진 Inlier들만 사용하여 최종 PCA (정교한 법선 계산)
+    inlier_points = points[best_inliers] if np.sum(best_inliers) >= 3 else points
+    centroid = inlier_points.mean(axis=0)
+    centered = inlier_points - centroid
     cov = np.cov(centered.T)
     eigenvalues, eigenvectors = np.linalg.eigh(cov)
 
@@ -168,7 +199,22 @@ def estimate_surface_normal(depth_image, cx, cy, intrinsics,
     pitch = math.degrees(math.atan2(normal[0], -normal[2]))
     yaw = 0.0  # depth만으로는 Z축 회전을 알 수 없음
 
-    return tuple(normal), roll, pitch, yaw
+    # RANSAC으로 구한 평면 방정식을 이용해 2D 중심 픽셀(cx, cy)의 깊이 Z를 수학적으로 역산
+    # Ray: X_ray = (cx - ppx)/fx, Y_ray = (cy - ppy)/fy, Z_ray = 1
+    ray_x = (cx - intrinsics.ppx) / intrinsics.fx
+    ray_y = (cy - intrinsics.ppy) / intrinsics.fy
+    ray_vector = np.array([ray_x, ray_y, 1.0])
+    
+    dot_product = np.dot(normal, ray_vector)
+    
+    if abs(dot_product) > 1e-6:
+        Z = np.dot(normal, centroid) / dot_product
+        robust_pos_3d = (ray_x * Z, ray_y * Z, Z)
+    else:
+        # 평면과 카메라 광선이 수평일 경우 폴백 (물리적으로 극히 드묾)
+        robust_pos_3d = tuple(centroid)
+
+    return tuple(normal), roll, pitch, yaw, robust_pos_3d
 
 
 def estimate_yaw_from_contour(color_image, depth_image, x1, y1, x2, y2):

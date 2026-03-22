@@ -89,20 +89,22 @@ def detect_3d(model, color_image, depth_image, intrinsics):
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
 
-        # 3) Depth 샘플링 → 3D 좌표
-        depth_mm = get_depth_at_pixel(depth_image, cx, cy)
-        if depth_mm == 0:
-            continue  # 유효한 depth가 없으면 스킵
-
-        pos_3d = pixel_to_3d(cx, cy, depth_mm, intrinsics)
-
-        # 4) 표면 법선 추정 → 자세 (roll, pitch)
-        #    bbox 전체 영역으로 PCA → 고정 패치보다 훨씬 안정적
-        normal, roll, pitch, yaw = estimate_surface_normal(
+        # 3) 표면 법선 추정 및 RANSAC 평면 기반 정교한 3D 좌표 획득
+        estimate_res = estimate_surface_normal(
             depth_image, cx, cy, intrinsics, bbox=(x1, y1, x2, y2)
         )
+        normal, roll, pitch, yaw, ransac_pos_3d = estimate_res
 
-        # 5) Yaw 추정: depth 마스크 + 윤곽선 기반
+        # 평면 추출에 실패했거나 깊이가 없는 경우 기존 Median 기반 백업 로직 사용
+        if ransac_pos_3d[2] == 0.0:
+            depth_mm = get_depth_at_pixel(depth_image, cx, cy)
+            if depth_mm == 0:
+                continue  # 유효한 depth가 없으면 스킵
+            pos_3d = pixel_to_3d(cx, cy, depth_mm, intrinsics)
+        else:
+            pos_3d = ransac_pos_3d
+
+        # 4) Yaw 추정: depth 마스크 + 윤곽선 기반
         yaw = estimate_yaw_from_contour(color_image, depth_image, x1, y1, x2, y2)
 
         # 6) 접근 벡터 계산

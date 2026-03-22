@@ -12,9 +12,8 @@ models/*.pt
 !runs/**/*.pt
 
 # ===== 이미지 데이터 (원본/가공/depth) =====
-data/raw_captures/
-data/cleaned_images/
-data/new_images/
+data
+
 
 # ===== 학습 데이터셋 =====
 data/dataset/
@@ -42,7 +41,7 @@ Thumbs.db
 .claude/
 
 # ===== 자료 정리 =====
-영상 및 관련 자료/
+video/
 
 # ===== 기타 =====
 *.log

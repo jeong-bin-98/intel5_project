@@ -238,6 +238,19 @@ def draw_depth_analysis(depth_image, objects):
                 color = COLORS.get(obj.class_id, (0, 255, 0))
                 radius = 8 if obj is pick_target else 5
                 cv2.circle(side_panel, (sx, sy), radius, color, -1)
+                
+                # RANSAC 평면 시각화 (XZ 단면선 노란색으로 표시)
+                if hasattr(obj, 'normal') and obj.normal:
+                    nx, ny, nz = obj.normal
+                    # 반경 20mm 넓이의 RANSAC 가상 평면 선 그리기
+                    ratio_x = (w - 70) / x_range
+                    ratio_z = (side_h - 30) / z_range
+                    dir_x_mm = -nz * 20 
+                    dir_z_mm = nx * 20
+                    dx = int(dir_x_mm * ratio_x)
+                    dz = int(dir_z_mm * ratio_z)
+                    cv2.line(side_panel, (sx - dx, sy - dz), (sx + dx, sy + dz), (0, 255, 255), 2)
+                    
                 cv2.putText(side_panel, f"{obj.class_name}", (sx + 10, sy + 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
                 cv2.putText(side_panel, f"Z={obj.pos_3d[2]:.0f}", (sx + 10, sy + 16),
