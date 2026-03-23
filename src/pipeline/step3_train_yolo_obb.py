@@ -21,15 +21,18 @@ Step 3: YOLO11-OBB 학습 (회전 바운딩 박스)
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from config.paths import DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN, DATASET_OBB_YAML, RUNS_DIR
+from config.paths import DATASET_OBB_DIR, DATASET_LABELS_OBB_TRAIN, DATASET_OBB_YAML, RUNS_DIR
 
 import shutil
 import random
 import torch
 from ultralytics import YOLO
 from ultralytics.utils import torch_utils
+from ultralytics.engine import validator as _validator
+from ultralytics.engine import predictor as _predictor
 
-# XPU 장치를 ultralytics select_device가 거부하지 않도록 패치 (step4와 동일)
+# XPU 장치를 ultralytics select_device가 거부하지 않도록 패치
+# validator/trainer가 from ... import select_device로 직접 가져오므로 모든 모듈에 패치 필요
 _orig_select_device = torch_utils.select_device
 
 def _patched_select_device(device="", batch=0, newline=False, verbose=True):
@@ -39,6 +42,8 @@ def _patched_select_device(device="", batch=0, newline=False, verbose=True):
     return _orig_select_device(device, batch, newline, verbose)
 
 torch_utils.select_device = _patched_select_device
+_validator.select_device = _patched_select_device
+_predictor.select_device = _patched_select_device
 
 # XPU용 메모리 함수 패치
 def _get_memory_xpu(self, fraction=False):
@@ -109,11 +114,12 @@ def train():
     _trainer.BaseTrainer._clear_memory = _clear_memory_xpu
 
     # ===== Train/Val 자동 분리 =====
-    split_train_val(DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN)
+    obb_images_train = os.path.join(DATASET_OBB_DIR, "images", "train")
+    split_train_val(obb_images_train, DATASET_LABELS_OBB_TRAIN)
 
     # ===== 학습 데이터 확인 =====
-    train_images = os.listdir(DATASET_IMAGES_TRAIN)
-    train_labels = os.listdir(DATASET_LABELS_TRAIN)
+    train_images = os.listdir(obb_images_train)
+    train_labels = os.listdir(DATASET_LABELS_OBB_TRAIN)
     print(f"\n학습 이미지: {len(train_images)}장")
     print(f"학습 라벨:   {len(train_labels)}개")
 

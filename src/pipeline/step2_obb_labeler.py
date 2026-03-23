@@ -32,11 +32,14 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from config.paths import (
     SAM_VIT_H, SAM_VIT_B,
+    RAW_CAPTURES_DIR,
     DATASET_IMAGES_TRAIN, DATASET_IMAGES_VAL,
+    DATASET_OBB_DIR,
     DATASET_LABELS_OBB_TRAIN, DATASET_LABELS_OBB_VAL,
 )
 
 import glob
+import shutil
 import numpy as np
 import cv2
 import torch
@@ -225,15 +228,51 @@ def reset_current():
     manual_points = []
 
 
-def setup_symlinks():
-    dataset_dir  = os.path.dirname(DATASET_IMAGES_TRAIN)
-    dataset_root = os.path.dirname(dataset_dir)
-    for name, target in [("train", DATASET_IMAGES_TRAIN), ("val", DATASET_IMAGES_VAL)]:
-        link = os.path.join(dataset_root, "images_obb", name)
-        os.makedirs(os.path.dirname(link), exist_ok=True)
-        if not os.path.exists(link):
-            os.symlink(os.path.abspath(target), link)
-            print(f"  symlink: {link} -> {target}")
+def import_raw_captures():
+    """
+    data/raw_captures/color/ 의 새 이미지를 data/dataset/images/train/ 으로 복사합니다.
+    이미 복사된 파일(동일 파일명)은 건너뜁니다.
+    """
+    src_dir = os.path.join(RAW_CAPTURES_DIR, "color")
+    if not os.path.exists(src_dir):
+        return
+
+    os.makedirs(DATASET_IMAGES_TRAIN, exist_ok=True)
+    src_files = sorted(glob.glob(os.path.join(src_dir, "*.png")))
+    copied = 0
+    for src in src_files:
+        dst = os.path.join(DATASET_IMAGES_TRAIN, os.path.basename(src))
+        if not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            copied += 1
+
+    if copied:
+        print(f"raw_captures → dataset/images/train: {copied}장 복사됨")
+    else:
+        print(f"raw_captures → dataset/images/train: 새 이미지 없음 (총 {len(src_files)}장 이미 존재)")
+
+
+def sync_obb_images():
+    """
+    data/dataset/images/ → data/dataset_obb/images/ 로 하드링크 동기화.
+    YOLO가 symlink를 resolve해서 /images/→/labels/ 매핑이 깨지므로 하드링크를 사용.
+    새 이미지만 추가하고, 이미 있는 파일은 건너뜀.
+    """
+    for name, src_dir in [("train", DATASET_IMAGES_TRAIN), ("val", DATASET_IMAGES_VAL)]:
+        dst_dir = os.path.join(DATASET_OBB_DIR, "images", name)
+        os.makedirs(dst_dir, exist_ok=True)
+        if not os.path.exists(src_dir):
+            continue
+        linked = 0
+        for fname in os.listdir(src_dir):
+            if not fname.endswith(".png"):
+                continue
+            dst = os.path.join(dst_dir, fname)
+            if not os.path.exists(dst):
+                os.link(os.path.join(src_dir, fname), dst)
+                linked += 1
+        if linked:
+            print(f"  dataset_obb/images/{name}: {linked}장 하드링크 추가")
 
 
 # ───────────────────────────────────────────────
@@ -257,9 +296,11 @@ def load_existing_labels(lbl_path):
 def main():
     global current_image, predictor, manual_mode
 
+    os.makedirs(DATASET_IMAGES_TRAIN, exist_ok=True)
     os.makedirs(DATASET_LABELS_OBB_TRAIN, exist_ok=True)
     os.makedirs(DATASET_LABELS_OBB_VAL, exist_ok=True)
-    setup_symlinks()
+    import_raw_captures()
+    sync_obb_images()
 
     print(f"\nLoading SAM ({SAM_MODEL_TYPE})...")
     if torch.xpu.is_available():
