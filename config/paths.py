@@ -31,8 +31,13 @@ YOLOV8N_PT = os.path.join(MODELS_DIR, "yolov8n.pt")
 RUNS_DIR = os.path.join(PROJECT_ROOT, "runs")
 YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector3", "weights", "best.pt")
 
+# ===== OBB 라벨 디렉토리 =====
+DATASET_LABELS_OBB_TRAIN = os.path.join(DATASET_DIR, "labels_obb", "train")
+DATASET_LABELS_OBB_VAL = os.path.join(DATASET_DIR, "labels_obb", "val")
+
 # ===== 설정 파일 =====
 DATASET_YAML = os.path.join(PROJECT_ROOT, "dataset.yaml")
+DATASET_OBB_YAML = os.path.join(PROJECT_ROOT, "dataset_obb.yaml")
 
 # ===== 로봇 SDK =====
 ROBOT_SDK_DIR = os.path.join(PROJECT_ROOT, "robot")

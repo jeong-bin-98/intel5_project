@@ -1,0 +1,15 @@
+# dataset_obb.yaml — YOLO11-OBB 학습용 데이터셋 설정
+# step2_obb_labeler.py 로 생성한 OBB 라벨을 사용합니다.
+#
+# 구조:
+#   data/dataset/images_obb/train/  → images/train/ 의 심볼릭 링크
+#   data/dataset/labels_obb/train/  → OBB 라벨 (.txt, 9값: class x1 y1 x2 y2 x3 y3 x4 y4)
+
+train: data/dataset/images_obb/train
+val:   data/dataset/images_obb/val
+
+nc: 2
+
+names:
+  0: "8pin_socket"
+  1: "12pin_socket"

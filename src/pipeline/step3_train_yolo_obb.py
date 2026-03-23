@@ -21,11 +21,42 @@ Step 3: YOLO11-OBB 학습 (회전 바운딩 박스)
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from config.paths import DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN, DATASET_YAML, RUNS_DIR
+from config.paths import DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN, DATASET_OBB_YAML, RUNS_DIR
 
 import shutil
 import random
+import torch
 from ultralytics import YOLO
+from ultralytics.utils import torch_utils
+
+# XPU 장치를 ultralytics select_device가 거부하지 않도록 패치 (step4와 동일)
+_orig_select_device = torch_utils.select_device
+
+def _patched_select_device(device="", batch=0, newline=False, verbose=True):
+    d = str(device) if not hasattr(device, "type") else device.type
+    if d.startswith("xpu"):
+        return torch.device("xpu")
+    return _orig_select_device(device, batch, newline, verbose)
+
+torch_utils.select_device = _patched_select_device
+
+# XPU용 메모리 함수 패치
+def _get_memory_xpu(self, fraction=False):
+    if self.device.type == "xpu":
+        mem = torch.xpu.memory_reserved(self.device)
+        total = torch.xpu.get_device_properties(self.device).total_memory
+        return mem / total if fraction else mem
+    return 0
+
+def _clear_memory_xpu(self, threshold=0.5):
+    if self.device.type == "xpu":
+        torch.xpu.empty_cache()
+
+if torch.xpu.is_available():
+    DEVICE = torch.device("xpu")
+else:
+    DEVICE = torch.device("cpu")
+    print("⚠️  XPU 없음 → CPU로 학습합니다 (느릴 수 있음)")
 
 
 def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
@@ -73,6 +104,10 @@ def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
 
 
 def train():
+    from ultralytics.engine import trainer as _trainer
+    _trainer.BaseTrainer._get_memory = _get_memory_xpu
+    _trainer.BaseTrainer._clear_memory = _clear_memory_xpu
+
     # ===== Train/Val 자동 분리 =====
     split_train_val(DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN)
 
@@ -95,14 +130,15 @@ def train():
 
     results = model.train(
         task="obb",             # OBB(회전 바운딩 박스) 모드 필수 설정
-        data=DATASET_YAML,      # 데이터셋 설정
+        data=DATASET_OBB_YAML,  # OBB 데이터셋 설정
         project=os.path.join(RUNS_DIR, "detect"),  # 결과 저장 위치
-        epochs=100,             # 최대 100 에폭 (early stopping으로 자동 종료됨)
+        epochs=20,             # 최대 100 에폭 (early stopping으로 자동 종료됨)
         imgsz=640,              # 이미지 크기
         batch=8,                # 배치 크기 (GPU 메모리에 맞게 조절)
         patience=30,            # 30 에폭 동안 개선 없으면 조기 종료
-        device="0",             # GPU 사용 ("cpu"로 바꾸면 CPU 사용)
-        workers=4,              # 데이터 로딩 워커 수
+        device=DEVICE,          # Intel XPU 또는 CPU (자동 선택)
+        amp=False,              # Intel XPU는 AMP CUDA 검사 우회 필요
+        workers=0,              # XPU에서는 0 권장
         name="socket_detector_obb", # 결과 저장 폴더 이름 (OBB 명시)
 
         # === 데이터 증강 ===
