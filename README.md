@@ -24,7 +24,7 @@ Intel5/
 │   │
 │   ├── pipeline/                   # OBB 데이터 수집 & 학습 파이프라인
 │   │   ├── step1_capture.py        # D435 RGB+Depth 촬영
-│   │   ├── step2_sam_labeler.py    # OBB 라벨링 (SAM 보조)
+│   │   ├── step2_obb_labeler.py    # 통합 OBB 라벨링 (SAM + 수동 박스 모드 지원)
 │   │   └── step3_train_yolo_obb.py # YOLO11-OBB 최신 학습 스크립트
 │   │
 │   ├── robot/                      # 로봇 제어
@@ -96,8 +96,8 @@ cd ..
 # 이미지 촬영
 python src/pipeline/step1_capture.py
 
-# OBB 라벨링
-python src/pipeline/step2_sam_labeler.py
+# 통합 OBB 라벨링 도구 실행 (클릭 or 수동 4포인트)
+python src/pipeline/step2_obb_labeler.py
 
 # YOLO11-OBB 학습
 python src/pipeline/step3_train_yolo_obb.py

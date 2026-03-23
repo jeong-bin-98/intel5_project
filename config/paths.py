@@ -21,6 +21,13 @@ DATASET_IMAGES_VAL = os.path.join(DATASET_DIR, "images", "val")
 DATASET_LABELS_TRAIN = os.path.join(DATASET_DIR, "labels", "train")
 DATASET_LABELS_VAL = os.path.join(DATASET_DIR, "labels", "val")
 
+# ===== OBB 전용 데이터셋 디렉토리 =====
+DATASET_OBB_DIR = os.path.join(DATA_DIR, "dataset_obb")
+DATASET_IMAGES_OBB_TRAIN = os.path.join(DATASET_OBB_DIR, "images", "train")
+DATASET_IMAGES_OBB_VAL = os.path.join(DATASET_OBB_DIR, "images", "val")
+DATASET_LABELS_OBB_TRAIN = os.path.join(DATASET_OBB_DIR, "labels", "train")
+DATASET_LABELS_OBB_VAL = os.path.join(DATASET_OBB_DIR, "labels", "val")
+
 # ===== 모델 가중치 =====
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 SAM_VIT_H = os.path.join(MODELS_DIR, "sam_vit_h_4b8939.pth")
@@ -29,7 +36,7 @@ YOLOV8N_PT = os.path.join(MODELS_DIR, "yolov8n.pt")
 
 # ===== YOLO 학습 결과 =====
 RUNS_DIR = os.path.join(PROJECT_ROOT, "runs")
-YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector3", "weights", "best.pt")
+YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector_obb", "weights", "best.pt")
 
 # ===== 설정 파일 =====
 DATASET_YAML = os.path.join(PROJECT_ROOT, "dataset.yaml")

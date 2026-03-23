@@ -21,7 +21,7 @@ Step 3: YOLO11-OBB 학습 (회전 바운딩 박스)
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from config.paths import DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN, DATASET_YAML, RUNS_DIR
+from config.paths import DATASET_IMAGES_OBB_TRAIN, DATASET_LABELS_OBB_TRAIN, DATASET_YAML, RUNS_DIR
 
 import shutil
 import random
@@ -38,13 +38,17 @@ def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
         train_lbl_dir: 학습 라벨 폴더
         val_ratio: 검증용 비율 (기본 20%)
     """
-    val_img_dir = train_img_dir.replace("/train", "/val")
-    val_lbl_dir = train_lbl_dir.replace("/train", "/val")
+    val_img_dir = train_img_dir.replace(os.sep + "train", os.sep + "val").replace("/train", "/val")
+    val_lbl_dir = train_lbl_dir.replace(os.sep + "train", os.sep + "val").replace("/train", "/val")
 
-    # val 폴더에 이미 파일이 있으면 스킵
+    # val 폴더에 이미 파일이 있으면 스킵 (단, 라벨도 완벽히 같이 들어있는지 검증)
     if os.path.exists(val_img_dir) and len(os.listdir(val_img_dir)) > 0:
-        print(f"val 폴더에 이미 {len(os.listdir(val_img_dir))}장 있음 → 분리 스킵")
-        return
+        if os.path.exists(val_lbl_dir) and len(os.listdir(val_lbl_dir)) > 0:
+            print(f"val 폴더에 이미 {len(os.listdir(val_img_dir))}장 있음 → 분리 스킵")
+            return
+        else:
+            print("⚠️ val 폴더에 이미지는 있지만 라벨 파일이 누락되어 있습니다. 캐시를 비우고 다시 분리합니다.")
+            shutil.rmtree(val_img_dir)
 
     os.makedirs(val_img_dir, exist_ok=True)
     os.makedirs(val_lbl_dir, exist_ok=True)
@@ -74,11 +78,11 @@ def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
 
 def train():
     # ===== Train/Val 자동 분리 =====
-    split_train_val(DATASET_IMAGES_TRAIN, DATASET_LABELS_TRAIN)
+    split_train_val(DATASET_IMAGES_OBB_TRAIN, DATASET_LABELS_OBB_TRAIN)
 
     # ===== 학습 데이터 확인 =====
-    train_images = os.listdir(DATASET_IMAGES_TRAIN)
-    train_labels = os.listdir(DATASET_LABELS_TRAIN)
+    train_images = os.listdir(DATASET_IMAGES_OBB_TRAIN)
+    train_labels = os.listdir(DATASET_LABELS_OBB_TRAIN)
     print(f"\n학습 이미지: {len(train_images)}장")
     print(f"학습 라벨:   {len(train_labels)}개")
 
@@ -86,12 +90,26 @@ def train():
         print("⚠️  라벨이 10개 미만입니다. Step 3에서 더 라벨링하세요.")
         return
 
-    # ===== YOLO11-OBB 학습 =====
-    print("\n" + "=" * 50)
-    print("YOLO11n-OBB 학습 시작")
-    print("=" * 50)
+    # ===== YOLO11-OBB 지능형 브리핑 =====
+    import torch
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    total_imgs = len(train_images) + len(os.listdir(DATASET_IMAGES_OBB_TRAIN.replace(os.sep + "train", os.sep + "val").replace("/train", "/val")))
+    
+    # GTX 1650 기준, 이미지 1장당 1에폭 처리에 대략 0.05초(OBB 모델 기준) + 검증 오버헤드
+    estimated_seconds = total_imgs * 100 * 0.05 + 20
+    est_min = int(estimated_seconds // 60)
+    est_sec = int(estimated_seconds % 60)
 
-    model = YOLO("yolo11n-obb.pt")  # 사전학습된 YOLO11 OBB (네오) 모델 자동 다운로드
+    print("\n" + "=" * 55)
+    print("🚀 YOLO11n-OBB 훈련 전 예측 브리핑")
+    print("=" * 55)
+    print(f"🖥️  연산 장치      : {gpu_name}")
+    print(f"📦  총 훈련 데이터 : {total_imgs}장 (배치 4로 분할 연산)")
+    print(f"⏱️  예상 소요 시간 : 약 {est_min}분 {est_sec}초 (100 에폭 완주 시)")
+    print(f"🛑  조기 종료(팁)  : 30번 연속 개선 없으면 시간 낭비 없이 자동 조기종료")
+    print("=" * 55 + "\n")
+
+    model = YOLO("yolo11n-obb.pt")  # 사전학습된 YOLO11 OBB 모델 
 
     results = model.train(
         task="obb",             # OBB(회전 바운딩 박스) 모드 필수 설정
@@ -99,10 +117,10 @@ def train():
         project=os.path.join(RUNS_DIR, "detect"),  # 결과 저장 위치
         epochs=100,             # 최대 100 에폭 (early stopping으로 자동 종료됨)
         imgsz=640,              # 이미지 크기
-        batch=8,                # 배치 크기 (GPU 메모리에 맞게 조절)
+        batch=4,                # 배치 크기 (GTX 1650 4GB VRAM 한계를 방어하기 위해 8 -> 4로 축소)
         patience=30,            # 30 에폭 동안 개선 없으면 조기 종료
         device="0",             # GPU 사용 ("cpu"로 바꾸면 CPU 사용)
-        workers=4,              # 데이터 로딩 워커 수
+        workers=2,              # 데이터 로딩 워커 수 (메모리 병목 방지용 4 -> 2 축소)
         name="socket_detector_obb", # 결과 저장 폴더 이름 (OBB 명시)
 
         # === 데이터 증강 ===
