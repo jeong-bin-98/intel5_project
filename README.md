@@ -40,9 +40,24 @@ Intel5/
 └── dataset.yaml                    # YOLO OBB 데이터셋 설정 (8pin, 12pin)
 ```
 
+## 다운로드 및 설치 (Installation)
+
+본 프로젝트는 하드웨어 연산 장치(GPU / XPU)에 따라 브랜치(Branch)가 나누어져 있습니다. 다른 컴퓨터에서 가져다 쓰실 땐 본인의 하드웨어 환경에 맞춰 아래 명령어 중 하나를 골라 다운로드(Clone)해 주세요.
+
+```bash
+# 옵션 A. NVIDIA GPU 기반 환경 (CUDA 최적화 버젼)
+git clone -b gpu/yolo11-obb-RANSAC https://github.com/jeong-bin-98/intel5_project.git
+
+# 옵션 B. Intel XPU / 일반 CPU 환경 (코어 울트라, ARC 등 NPU/XPU 최적화 버젼)
+git clone -b xpu/yolo11-obb-RANSAC https://github.com/jeong-bin-98/intel5_project.git
+
+# 다운로드 완료 후 프로젝트 폴더로 진입
+cd intel5_project
+```
+
 ## 초기 설정 (Setup)
 
-다른 컴퓨터나 로봇 제어기 환경에서 프로젝트를 그대로 복원하기 위한 세팅 방법입니다.
+코드를 다운로드하신 뒤, 해당 컴퓨터에서 프로젝트를 구동하기 위한 초기 세팅 방법입니다.
 
 ### 1. 패키지 라이브러리 설치
 동봉된 `requirements.txt`를 사용하여 동일한 파이썬 환경을 구성합니다.
