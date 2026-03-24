@@ -36,6 +36,7 @@ YOLOV8N_PT = os.path.join(MODELS_DIR, "yolov8n.pt")
 
 # ===== YOLO 학습 결과 =====
 RUNS_DIR = os.path.join(PROJECT_ROOT, "runs")
+BENCHMARK_DIR = os.path.join(RUNS_DIR, "benchmark")
 YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector_obb", "weights", "best.pt")
 
 # ===== 설정 파일 =====
