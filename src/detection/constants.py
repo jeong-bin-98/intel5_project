@@ -6,9 +6,28 @@
 """
 
 import torch
+from ultralytics.utils import torch_utils
+from ultralytics.engine import predictor as _predictor
 
-# GPU 설정
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+# Ultralytics select_device 패치: XPU 디바이스 인식
+_orig_select_device = torch_utils.select_device
+
+def _patched_select_device(device="", newline=False, verbose=True):
+    d = str(device) if not hasattr(device, "type") else device.type
+    if d.startswith("xpu"):
+        return torch.device("xpu")
+    return _orig_select_device(device, newline, verbose)
+
+torch_utils.select_device = _patched_select_device
+_predictor.select_device = _patched_select_device
+
+# GPU 설정 (Intel Arc A770 XPU)
+if hasattr(torch, 'xpu') and torch.xpu.is_available():
+    DEVICE = 'xpu'
+elif torch.cuda.is_available():
+    DEVICE = 'cuda'
+else:
+    DEVICE = 'cpu'
 
 # YOLO 설정
 CONFIDENCE = 0.7
@@ -31,15 +50,17 @@ class DetectedObject:
     """탐지된 소켓 한 개의 정보를 담는 클래스"""
 
     def __init__(self, class_id, confidence, bbox, pos_3d, orientation, approach,
-                 normal=None):
+                 normal=None, obb_corners=None, obb_angle=None):
         self.class_id = class_id        # 0=8pin, 1=12pin
         self.class_name = CLASS_NAMES.get(class_id, str(class_id))
         self.confidence = confidence     # 0~1
-        self.bbox = bbox                 # (x1, y1, x2, y2) 픽셀
+        self.bbox = bbox                 # (x1, y1, x2, y2) 축 정렬 바운딩 박스 (호환용)
         self.pos_3d = pos_3d             # (X, Y, Z) mm 카메라 좌표계
         self.orientation = orientation   # (roll, pitch, yaw) degrees
         self.approach = approach         # ((ax,ay,az), (rx,ry,rz))
         self.normal = normal             # (nx, ny, nz) 표면 법선 벡터
+        self.obb_corners = obb_corners   # OBB 꼭짓점 (4, 2) ndarray or None
+        self.obb_angle = obb_angle       # OBB 회전 각도 (degrees) or None
 
     @property
     def depth_mm(self):

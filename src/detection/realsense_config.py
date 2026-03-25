@@ -59,6 +59,24 @@ MEDIAN_FRAMES = 7
 # 파이프라인 생성
 # =============================================================================
 
+def _reset_camera():
+    """이전 프로세스가 비정상 종료된 경우 카메라를 하드웨어 리셋합니다.
+
+    kill -9 등으로 pipeline.stop() 없이 종료되면 카메라 펌웨어가
+    아직 스트리밍 중이라고 인식합니다. hardware_reset()은 USB 재연결과
+    동일한 효과로 이 상태를 해제합니다.
+    """
+    import time
+    ctx = rs.context()
+    devices = ctx.query_devices()
+    if len(devices) == 0:
+        raise RuntimeError("RealSense 카메라를 찾을 수 없습니다.")
+    for dev in devices:
+        dev.hardware_reset()
+    print("  RealSense 하드웨어 리셋 완료, 재연결 대기...")
+    time.sleep(3)
+
+
 def create_pipeline(color_res=None, depth_res=None, fps=FPS):
     """RealSense 파이프라인을 생성하고 최적 설정을 적용합니다.
 
@@ -87,7 +105,19 @@ def create_pipeline(color_res=None, depth_res=None, fps=FPS):
     config.enable_stream(rs.stream.depth, depth_res[0], depth_res[1],
                          rs.format.z16, fps)
 
-    profile = pipeline.start(config)
+    # 파이프라인 시작 시도, 실패하면 카메라 리셋 후 재시도
+    try:
+        profile = pipeline.start(config)
+    except RuntimeError:
+        print("  [경고] 카메라가 잠겨 있습니다. 하드웨어 리셋 시도...")
+        _reset_camera()
+        pipeline = rs.pipeline()
+        config = rs.config()
+        config.enable_stream(rs.stream.color, color_res[0], color_res[1],
+                             rs.format.bgr8, fps)
+        config.enable_stream(rs.stream.depth, depth_res[0], depth_res[1],
+                             rs.format.z16, fps)
+        profile = pipeline.start(config)
 
     # --- 센서 최적화 ---
     _configure_sensor(profile)

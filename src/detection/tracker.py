@@ -21,7 +21,8 @@ class _KalmanTrack:
     """
 
     def __init__(self, pos_3d, orientation, cx, cy, class_id,
-                 process_noise=0.5, measurement_noise=5.0, normal=None):
+                 process_noise=0.5, measurement_noise=5.0, normal=None,
+                 obb_corners=None, obb_angle=None):
         self.class_id = class_id
         self.cx = cx
         self.cy = cy
@@ -29,6 +30,8 @@ class _KalmanTrack:
         self.orientation = np.array(orientation, dtype=np.float64)
         self.normal = np.array(normal if normal is not None else (0, 0, -1),
                                dtype=np.float64)
+        self.obb_corners = obb_corners  # OBB 꼭짓점 (4, 2)
+        self.obb_angle = obb_angle      # OBB 회전 각도 (degrees)
 
         # 칼만 필터 초기화 (6 상태, 3 관측)
         self.kf = cv2.KalmanFilter(6, 3)
@@ -65,7 +68,8 @@ class _KalmanTrack:
         """예측 단계 — 미탐지 프레임에서도 호출"""
         return self.kf.predict()
 
-    def update(self, pos_3d, orientation, cx, cy, normal=None):
+    def update(self, pos_3d, orientation, cx, cy, normal=None,
+               obb_corners=None, obb_angle=None):
         """관측값으로 보정"""
         measurement = np.array(
             [pos_3d[0], pos_3d[1], pos_3d[2]], dtype=np.float32
@@ -74,6 +78,8 @@ class _KalmanTrack:
         self.cx = cx
         self.cy = cy
         self.last_seen = 0
+        self.obb_corners = obb_corners
+        self.obb_angle = obb_angle
 
         # 자세는 EMA (alpha=0.4) — 각도는 칼만보다 단순 스무딩이 적절
         alpha = SMOOTHING_ALPHA
@@ -142,8 +148,13 @@ class ObjectSmoother:
         results = []
 
         for obj in objects:
-            cx = (obj.bbox[0] + obj.bbox[2]) // 2
-            cy = (obj.bbox[1] + obj.bbox[3]) // 2
+            # OBB 꼭짓점 중심 사용 (없으면 AABB 중심 폴백)
+            if obj.obb_corners is not None:
+                cx = int(obj.obb_corners[:, 0].mean())
+                cy = int(obj.obb_corners[:, 1].mean())
+            else:
+                cx = (obj.bbox[0] + obj.bbox[2]) // 2
+                cy = (obj.bbox[1] + obj.bbox[3]) // 2
 
             # 가장 가까운 기존 트랙 찾기
             best_tid = None
@@ -165,7 +176,9 @@ class ObjectSmoother:
                 # 기존 트랙 업데이트 (칼만 보정)
                 track = self.tracks[best_tid]
                 track.update(obj.pos_3d, obj.orientation, cx, cy,
-                             normal=obj.normal)
+                             normal=obj.normal,
+                             obb_corners=obj.obb_corners,
+                             obb_angle=obj.obb_angle)
                 used_tracks.add(best_tid)
 
                 s_pos = track.get_state()
@@ -181,7 +194,8 @@ class ObjectSmoother:
 
                 results.append(DetectedObject(
                     obj.class_id, obj.confidence, obj.bbox,
-                    s_pos, s_ori, approach, normal=s_normal
+                    s_pos, s_ori, approach, normal=s_normal,
+                    obb_corners=obj.obb_corners, obb_angle=obj.obb_angle
                 ))
             else:
                 # 새 트랙 생성
@@ -190,7 +204,8 @@ class ObjectSmoother:
                 self.tracks[tid] = _KalmanTrack(
                     obj.pos_3d, obj.orientation, cx, cy, obj.class_id,
                     self.process_noise, self.measurement_noise,
-                    normal=obj.normal
+                    normal=obj.normal,
+                    obb_corners=obj.obb_corners, obb_angle=obj.obb_angle
                 )
                 used_tracks.add(tid)
                 results.append(obj)

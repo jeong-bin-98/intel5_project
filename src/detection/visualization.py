@@ -15,28 +15,26 @@ from src.detection.constants import (
 from src.detection.tracker import select_pick_target
 
 
-def _draw_3d_axes(display, roll, pitch, yaw, intrinsics, pos_3d,
-                   axis_length_mm=30, normal=None):
+def _draw_3d_axes(display, intrinsics, pos_3d, axis_length_mm=30,
+                   normal=None, obb_corners=None):
     """소켓 중심에 3D 좌표축 (X=빨강, Y=초록, Z=파랑)을 그립니다.
 
-    Z축 = 표면 법선 방향 (depth point cloud의 2D 평면에 수직)
-    X, Y축 = 표면 평면 위의 두 방향
-
-    법선 벡터가 주어지면 직접 회전 행렬을 구성하여
-    Z축이 정확히 표면 법선 방향을 가리킵니다.
+    X축 = OBB width 방향 (corners에서 직접 추출)
+    Y축 = OBB height 방향 (corners에서 직접 추출)
+    Z축 = 표면 법선 방향 (3D→2D 투영)
 
     Args:
         display: 그릴 이미지
-        roll, pitch, yaw: 자세 (degrees) — 법선이 없을 때 폴백
         intrinsics: RealSense 카메라 intrinsics
         pos_3d: (X, Y, Z) mm 소켓 3D 위치
         axis_length_mm: 축 길이 (mm)
-        normal: (nx, ny, nz) 표면 법선 벡터 (있으면 이것으로 Z축 결정)
+        normal: (nx, ny, nz) 표면 법선 벡터
+        obb_corners: OBB 꼭짓점 (4, 2) ndarray
     """
-    if intrinsics is None or pos_3d is None:
+    if intrinsics is None or pos_3d is None or pos_3d[2] <= 0:
         return
 
-    # 카메라 행렬
+    h_img, w_img = display.shape[:2]
     camera_matrix = np.array([
         [intrinsics.fx, 0, intrinsics.ppx],
         [0, intrinsics.fy, intrinsics.ppy],
@@ -44,80 +42,69 @@ def _draw_3d_axes(display, roll, pitch, yaw, intrinsics, pos_3d,
     ], dtype=np.float64)
     dist_coeffs = np.array(intrinsics.coeffs, dtype=np.float64)
 
-    if normal is not None:
-        # 법선 벡터로 직접 회전 행렬 구성
-        # Z축 = 법선 방향 (표면에 수직, 카메라 쪽을 향함)
-        z_axis = np.array(normal, dtype=np.float64)
-        z_norm = np.linalg.norm(z_axis)
-        if z_norm > 0:
-            z_axis = z_axis / z_norm
+    # depth에 비례한 축 픽셀 길이 (일정한 물리적 크기)
+    axis_px = axis_length_mm * intrinsics.fx / pos_3d[2]
 
-        # X축: Z축과 카메라 Y축(아래 방향)의 외적
-        up = np.array([0.0, 1.0, 0.0])
-        if abs(np.dot(z_axis, up)) > 0.99:
-            # Z축이 거의 Y축과 평행하면 다른 축 사용
-            up = np.array([1.0, 0.0, 0.0])
-        x_axis = np.cross(up, z_axis)
-        x_axis = x_axis / np.linalg.norm(x_axis)
+    if obb_corners is not None:
+        # OBB 중심 (pixel)
+        center = obb_corners.mean(axis=0)
+        origin = (int(center[0]), int(center[1]))
 
-        # Y축: Z축과 X축의 외적 (오른손 좌표계)
-        y_axis = np.cross(z_axis, x_axis)
-        y_axis = y_axis / np.linalg.norm(y_axis)
+        # X축 (width 방향): corner[0]-corner[3] = 2*vec1 (YOLO OBB 규약)
+        width_dir = obb_corners[0] - obb_corners[3]
+        w_len = np.linalg.norm(width_dir)
 
-        # Yaw 회전 적용 (Z축 기준 회전)
-        if yaw != 0.0:
-            rz = math.radians(yaw)
-            cos_rz, sin_rz = math.cos(rz), math.sin(rz)
-            x_rot = cos_rz * x_axis + sin_rz * y_axis
-            y_rot = -sin_rz * x_axis + cos_rz * y_axis
-            x_axis = x_rot
-            y_axis = y_rot
+        # Y축 (height 방향): corner[0]-corner[1] = 2*vec2
+        height_dir = obb_corners[0] - obb_corners[1]
+        h_len = np.linalg.norm(height_dir)
 
-        R = np.column_stack([x_axis, y_axis, z_axis])
+        axes = []  # (end_px, end_py, color, label)
+
+        if w_len > 0:
+            x_end = center + width_dir / w_len * axis_px
+            axes.append((int(x_end[0]), int(x_end[1]), (0, 0, 255), "X"))
+
+        if h_len > 0:
+            y_end = center + height_dir / h_len * axis_px
+            axes.append((int(y_end[0]), int(y_end[1]), (0, 255, 0), "Y"))
+
+        # Z축: 법선 방향을 3D→2D 투영하여 방향 벡터 획득
+        if normal is not None:
+            n = np.array(normal, dtype=np.float64)
+            n_norm = np.linalg.norm(n)
+            if n_norm > 0:
+                n = n / n_norm
+                p1 = np.array(pos_3d, dtype=np.float64) / 1000.0
+                p2 = p1 + n * axis_length_mm / 1000.0
+                pts_3d = np.float32([list(p1), list(p2)])
+                rvec_zero = np.zeros(3, dtype=np.float64)
+                tvec_zero = np.zeros(3, dtype=np.float64)
+                pts_2d, _ = cv2.projectPoints(
+                    pts_3d, rvec_zero, tvec_zero, camera_matrix, dist_coeffs
+                )
+                z_dir = pts_2d[1][0] - pts_2d[0][0]
+                z_end = center + z_dir
+                axes.append((int(z_end[0]), int(z_end[1]), (255, 0, 0), "Z"))
+
+        # 그리기
+        for px, py, color, label in axes:
+            if (-w_img < px < 2 * w_img and -h_img < py < 2 * h_img):
+                cv2.line(display, origin, (px, py), color, 2)
+                if 0 <= px < w_img and 0 <= py < h_img:
+                    cv2.putText(display, label, (px + 3, py - 3),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
     else:
-        # 폴백: Euler 각으로 회전 행렬 구성
-        rx = math.radians(roll)
-        ry = math.radians(pitch)
-        rz = math.radians(yaw)
-
-        Rx = np.array([[1, 0, 0],
-                       [0, math.cos(rx), -math.sin(rx)],
-                       [0, math.sin(rx), math.cos(rx)]])
-        Ry = np.array([[math.cos(ry), 0, math.sin(ry)],
-                       [0, 1, 0],
-                       [-math.sin(ry), 0, math.cos(ry)]])
-        Rz = np.array([[math.cos(rz), -math.sin(rz), 0],
-                       [math.sin(rz), math.cos(rz), 0],
-                       [0, 0, 1]])
-        R = Rz @ Ry @ Rx
-
-    # 회전 행렬 → Rodrigues 벡터
-    rvec, _ = cv2.Rodrigues(R)
-
-    # 소켓 3D 위치 (mm → m)
-    tvec = np.array([[pos_3d[0] / 1000.0],
-                     [pos_3d[1] / 1000.0],
-                     [pos_3d[2] / 1000.0]], dtype=np.float64)
-
-    # drawFrameAxes로 XYZ 좌표축 그리기
-    axis_m = axis_length_mm / 1000.0
-    cv2.drawFrameAxes(display, camera_matrix, dist_coeffs,
-                      rvec, tvec, axis_m, thickness=2)
-
-    # 축 끝에 라벨 표시
-    # 각 축의 끝점을 3D → 2D 투영
-    axes_3d = np.float32([
-        [axis_m, 0, 0],   # X축 끝
-        [0, axis_m, 0],   # Y축 끝
-        [0, 0, axis_m],   # Z축 끝
-    ])
-    pts_2d, _ = cv2.projectPoints(axes_3d, rvec, tvec, camera_matrix, dist_coeffs)
-    labels = [("X", (0, 0, 255)), ("Y", (0, 255, 0)), ("Z", (255, 0, 0))]
-
-    for pt, (name, lcolor) in zip(pts_2d, labels):
-        px, py = int(pt[0][0]), int(pt[0][1])
-        cv2.putText(display, name, (px + 3, py - 3),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, lcolor, 2)
+        # 폴백: OBB corners 없을 때 — 3D 좌표축만 표시
+        if normal is not None:
+            p_center = np.array(pos_3d, dtype=np.float64) / 1000.0
+            rvec_zero = np.zeros(3, dtype=np.float64)
+            tvec_zero = np.zeros(3, dtype=np.float64)
+            pts_2d, _ = cv2.projectPoints(
+                np.float32([list(p_center)]), rvec_zero, tvec_zero,
+                camera_matrix, dist_coeffs
+            )
+            origin = (int(pts_2d[0][0][0]), int(pts_2d[0][0][1]))
+            cv2.circle(display, origin, 4, (255, 0, 0), -1)
 
 
 def draw_depth_analysis(depth_image, objects):
@@ -185,8 +172,12 @@ def draw_depth_analysis(depth_image, objects):
         cy = (y1 + y2) // 2
         color = COLORS.get(obj.class_id, (0, 255, 0))
 
-        # bbox
-        cv2.rectangle(colormap, (x1, y1), (x2, y2), color, 1)
+        # bbox (OBB 꼭짓점이 있으면 회전 박스, 없으면 축 정렬 박스)
+        if obj.obb_corners is not None:
+            corners = obj.obb_corners.astype(int)
+            cv2.polylines(colormap, [corners], isClosed=True, color=color, thickness=1)
+        else:
+            cv2.rectangle(colormap, (x1, y1), (x2, y2), color, 1)
         # 중심 십자
         cv2.drawMarker(colormap, (cx, cy), (255, 255, 255),
                        cv2.MARKER_CROSS, 10, 1)
@@ -202,70 +193,7 @@ def draw_depth_analysis(depth_image, objects):
     cv2.putText(colormap, "Depth Map", (10, 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-    # === 4) 측면 뷰 (XZ 평면) — 하단 패널 ===
-    side_h = 120
-    side_panel = np.zeros((side_h, w, 3), dtype=np.uint8)
-    side_panel[:] = (40, 40, 40)
-
-    cv2.putText(side_panel, "Side View (XZ)", (10, 15),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-
-    if objects:
-        # XZ 범위 계산
-        xs = [obj.pos_3d[0] for obj in objects if obj.pos_3d]
-        zs = [obj.pos_3d[2] for obj in objects if obj.pos_3d]
-        if xs and zs:
-            x_min, x_max = min(xs) - 50, max(xs) + 50
-            z_min, z_max = min(zs) - 30, max(zs) + 30
-            x_range = max(x_max - x_min, 1)
-            z_range = max(z_max - z_min, 1)
-
-            # 그리드
-            for gz in range(int(z_min), int(z_max), 50):
-                sy = int(20 + (gz - z_min) / z_range * (side_h - 30))
-                if 20 <= sy < side_h:
-                    cv2.line(side_panel, (60, sy), (w - 10, sy), (60, 60, 60), 1)
-                    cv2.putText(side_panel, f"{gz:.0f}", (5, sy + 4),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (150, 150, 150), 1)
-
-            # 소켓 위치
-            pick_target = select_pick_target(objects)
-            for obj in objects:
-                if not obj.pos_3d:
-                    continue
-                sx = int(60 + (obj.pos_3d[0] - x_min) / x_range * (w - 70))
-                sy = int(20 + (obj.pos_3d[2] - z_min) / z_range * (side_h - 30))
-                color = COLORS.get(obj.class_id, (0, 255, 0))
-                radius = 8 if obj is pick_target else 5
-                cv2.circle(side_panel, (sx, sy), radius, color, -1)
-                
-                # RANSAC 평면 시각화 (XZ 단면선 노란색으로 표시)
-                if hasattr(obj, 'normal') and obj.normal:
-                    nx, ny, nz = obj.normal
-                    # 반경 20mm 넓이의 RANSAC 가상 평면 선 그리기
-                    ratio_x = (w - 70) / x_range
-                    ratio_z = (side_h - 30) / z_range
-                    dir_x_mm = -nz * 20 
-                    dir_z_mm = nx * 20
-                    dx = int(dir_x_mm * ratio_x)
-                    dz = int(dir_z_mm * ratio_z)
-                    cv2.line(side_panel, (sx - dx, sy - dz), (sx + dx, sy + dz), (0, 255, 255), 2)
-                    
-                cv2.putText(side_panel, f"{obj.class_name}", (sx + 10, sy + 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-                cv2.putText(side_panel, f"Z={obj.pos_3d[2]:.0f}", (sx + 10, sy + 16),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
-
-            # 축 라벨
-            cv2.putText(side_panel, "X->", (w // 2, side_h - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 0, 255), 1)
-            cv2.putText(side_panel, "Z(depth)", (5, side_h - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 0, 0), 1)
-
-    # 합치기
-    depth_panel = np.vstack([colormap, side_panel])
-
-    return depth_panel
+    return colormap
 
 
 def draw_3d_detections(image, objects, intrinsics=None, depth_colormap=None):
@@ -297,10 +225,14 @@ def draw_3d_detections(image, objects, intrinsics=None, depth_colormap=None):
         x1, y1, x2, y2 = obj.bbox
         color = COLORS.get(obj.class_id, (0, 255, 0))
         is_target = (obj is pick_target)
-
-        # 바운딩 박스 (픽킹 대상은 두꺼운 테두리)
         thickness = 3 if is_target else 2
-        cv2.rectangle(display, (x1, y1), (x2, y2), color, thickness)
+
+        # OBB 꼭짓점이 있으면 회전 바운딩 박스, 없으면 축 정렬 박스
+        if obj.obb_corners is not None:
+            corners = obj.obb_corners.astype(int)
+            cv2.polylines(display, [corners], isClosed=True, color=color, thickness=thickness)
+        else:
+            cv2.rectangle(display, (x1, y1), (x2, y2), color, thickness)
 
         # 픽킹 대상 표시
         if is_target:
@@ -318,11 +250,10 @@ def draw_3d_detections(image, objects, intrinsics=None, depth_colormap=None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
         # === 3D 좌표축 그리기 (X=빨강, Y=초록, Z=파랑) ===
-        if obj.pos_3d and obj.orientation and intrinsics:
-            roll, pitch, yaw = obj.orientation
-            _draw_3d_axes(display, roll, pitch, yaw,
-                          intrinsics, obj.pos_3d, axis_length_mm=30,
-                          normal=obj.normal)
+        if obj.pos_3d and intrinsics:
+            _draw_3d_axes(display, intrinsics, obj.pos_3d,
+                          axis_length_mm=30, normal=obj.normal,
+                          obb_corners=obj.obb_corners)
 
         # === 3D 좌표 (XYZ mm) 텍스트 ===
         if obj.pos_3d:
@@ -340,38 +271,8 @@ def draw_3d_detections(image, objects, intrinsics=None, depth_colormap=None):
             cv2.putText(display, ori_text, (x1, y2 + 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 255), 1)
 
-    # 상단 정보
-    cv2.putText(display, f"Detected: {len(objects)}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-    # 좌측 하단에 좌표계 범례
-    legend_x, legend_y = 10, image.shape[0] - 60
-    cv2.putText(display, "Axes:", (legend_x, legend_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-    cv2.arrowedLine(display, (legend_x + 50, legend_y), (legend_x + 90, legend_y),
-                    (0, 0, 255), 2, tipLength=0.3)
-    cv2.putText(display, "X", (legend_x + 92, legend_y + 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-    cv2.arrowedLine(display, (legend_x + 50, legend_y), (legend_x + 50, legend_y - 40),
-                    (0, 255, 0), 2, tipLength=0.3)
-    cv2.putText(display, "Y", (legend_x + 42, legend_y - 44),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-    cv2.putText(display, "Z(depth)", (legend_x + 100, legend_y),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 0, 0), 1)
-
-    # 3D 좌표 요약 패널
-    if objects:
-        panel_y = 60
-        cv2.putText(display, "--- 3D Coordinates ---", (10, panel_y),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-        for i, obj in enumerate(objects):
-            if obj.pos_3d:
-                panel_y += 18
-                marker = ">>" if obj is pick_target else "  "
-                txt = (f"{marker} [{i}] {obj.class_name}: "
-                       f"X={obj.pos_3d[0]:.1f} Y={obj.pos_3d[1]:.1f} Z={obj.pos_3d[2]:.1f}mm")
-                text_color = (0, 255, 0) if obj is pick_target else (200, 200, 200)
-                cv2.putText(display, txt, (10, panel_y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, text_color, 1)
+    # 상단 정보 — y=20 라인은 binpicking_3d.py의 FPS/Pipeline용으로 비워둠
+    cv2.putText(display, f"Detected: {len(objects)}", (10, 45),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
 
     return display

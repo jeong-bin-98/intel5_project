@@ -2,7 +2,7 @@
 3D Object Detection & Pose Estimation for Bin-Picking
 =====================================================
 
-YOLOv8 + Intel RealSense D435 기반 3D 소켓 탐지 및 자세 추정 시스템
+YOLO11-OBB + Intel RealSense D435 기반 3D 소켓 탐지 및 자세 추정 시스템
 
 사용법:
     python src/detection/binpicking_3d.py                  # 실시간 3D 탐지 + 시각화
@@ -11,11 +11,12 @@ YOLOv8 + Intel RealSense D435 기반 3D 소켓 탐지 및 자세 추정 시스�
     python src/detection/binpicking_3d.py --test           # 카메라 없이 단일 이미지 테스트
 
 기능:
-    1. YOLOv8으로 소켓(8pin/12pin) 2D 탐지
+    1. YOLO11-OBB로 소켓(8pin/12pin) 회전 바운딩 박스(OBB) 탐지
     2. RealSense depth로 3D 좌표(X,Y,Z) 계산 (카메라 intrinsics 기반)
     3. Depth 기반 표면 법선 추정으로 소켓 기울기(orientation) 계산
-    4. 로봇 접근 벡터(approach vector) 자동 계산
-    5. 가장 높은 소켓 우선 픽킹 (bin-picking 전략)
+    4. OBB 회전 각도로 정밀한 yaw 추정
+    5. 로봇 접근 벡터(approach vector) 자동 계산
+    6. 가장 높은 소켓 우선 픽킹 (bin-picking 전략)
 
 조작법:
     - 'q': 종료
@@ -26,8 +27,13 @@ YOLOv8 + Intel RealSense D435 기반 3D 소켓 탐지 및 자세 추정 시스�
 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
-from config.paths import YOLO_BEST_PT, NEW_IMAGES_DIR
+os.environ.setdefault('QT_QPA_PLATFORM', 'xcb')
+from config.paths import YOLO_BEST_PT, NEW_IMAGES_DIR, BENCHMARK_DIR
 
+import math
+import json
+import glob
+import argparse
 import numpy as np
 import cv2
 from datetime import datetime
@@ -39,8 +45,7 @@ from src.detection.constants import (
 )
 from src.detection.geometry import (
     get_depth_at_pixel, pixel_to_3d,
-    estimate_surface_normal, estimate_yaw_from_contour,
-    compute_approach_vector
+    estimate_surface_normal, compute_approach_vector
 )
 from src.detection.tracker import ObjectSmoother, select_pick_target
 from src.detection.visualization import (
@@ -55,45 +60,92 @@ from src.detection.realsense_config import (
 MODEL_PATH = YOLO_BEST_PT
 
 
+def load_model(device_choice="xpu"):
+    """디바이스에 맞는 YOLO 모델을 로드합니다.
+
+    Args:
+        device_choice: "cpu", "openvino", "xpu"
+
+    Returns:
+        (model, device_str, device_label) 튜플
+    """
+    if device_choice == "openvino":
+        # OpenVINO IR 모델 경로 찾기/변환
+        model_dir = os.path.dirname(MODEL_PATH)
+        ov_dir = os.path.join(model_dir, "best_openvino_model")
+        if not os.path.isdir(ov_dir) or not glob.glob(os.path.join(ov_dir, "*.xml")):
+            print("OpenVINO IR 변환 중...")
+            tmp_model = YOLO(MODEL_PATH)
+            tmp_model.export(format="openvino")
+            del tmp_model
+        # task="obb" 명시 — 없으면 detect로 잘못 인식되어 OBB 결과가 안 나옴
+        model = YOLO(ov_dir, task="obb")
+        return model, "auto", "OpenVINO"  # auto = device 인자 생략
+    elif device_choice == "cpu":
+        model = YOLO(MODEL_PATH)
+        return model, "cpu", "CPU"
+    else:
+        # xpu (기본)
+        model = YOLO(MODEL_PATH)
+        model.to(DEVICE)
+        return model, DEVICE, DEVICE.upper()
+
+
 # =============================================================================
 # 메인 파이프라인
 # =============================================================================
 
-def detect_3d(model, color_image, depth_image, intrinsics):
+def detect_3d(model, color_image, depth_image, intrinsics, device=None):
     """
-    YOLOv8 탐지 + depth → 3D 좌표 & pose 추정 전체 파이프라인
-
-    레퍼런스의 yolo_order.py + node_order.py의 핵심 로직을 통합.
+    YOLO11-OBB 탐지 + depth → 3D 좌표 & pose 추정 전체 파이프라인
 
     Args:
-        model: YOLOv8 모델
+        model: YOLO11-OBB 모델
         color_image: RGB 이미지 (H, W, 3)
         depth_image: depth 이미지 (H, W) - mm
         intrinsics: RealSense 카메라 내부 파라미터
+        device: 추론 디바이스 (None이면 constants.DEVICE 사용)
 
     Returns:
         objects: DetectedObject 리스트
     """
-    # 1) YOLOv8 추론 (GPU)
-    results = model(color_image, conf=CONFIDENCE, verbose=False, device=DEVICE)
-    boxes = results[0].boxes
+    # 1) YOLO11-OBB 추론
+    _device = device if device is not None else DEVICE
+    if _device == "auto":
+        # OpenVINO 등 자체 디바이스 관리 모델 — device 인자 생략
+        results = model(color_image, conf=CONFIDENCE, verbose=False)
+    else:
+        results = model(color_image, conf=CONFIDENCE, verbose=False, device=_device)
+    obb = results[0].obb
+
+    if obb is None or len(obb) == 0:
+        return []
 
     objects = []
 
-    for i in range(len(boxes)):
-        conf = float(boxes.conf[i])
-        cls_id = int(boxes.cls[i])
-        x1, y1, x2, y2 = map(int, boxes.xyxy[i].cpu().numpy())
+    for i in range(len(obb)):
+        conf = float(obb.conf[i])
+        cls_id = int(obb.cls[i])
 
-        # 2) 바운딩 박스 중심 계산
-        cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
+        # OBB: xywhr (center_x, center_y, width, height, rotation_rad)
+        xywhr = obb.xywhr[i].cpu().numpy()
+        cx, cy = int(xywhr[0]), int(xywhr[1])
+        obb_angle_rad = float(xywhr[4])
 
-        # 3) 표면 법선 추정 및 RANSAC 평면 기반 정교한 3D 좌표 획득
+        # OBB 꼭짓점 (4, 2) — 회전된 바운딩 박스 시각화용
+        corners = obb.xyxyxyxy[i].cpu().numpy().reshape(4, 2)
+
+        # 축 정렬 바운딩 박스 (기존 geometry 함수 호환용)
+        x1 = int(corners[:, 0].min())
+        y1 = int(corners[:, 1].min())
+        x2 = int(corners[:, 0].max())
+        y2 = int(corners[:, 1].max())
+
+        # 2) 표면 법선 추정 및 RANSAC 평면 기반 정교한 3D 좌표 획득
         estimate_res = estimate_surface_normal(
             depth_image, cx, cy, intrinsics, bbox=(x1, y1, x2, y2)
         )
-        normal, roll, pitch, yaw, ransac_pos_3d = estimate_res
+        normal, roll, pitch, _yaw, ransac_pos_3d = estimate_res
 
         # 평면 추출에 실패했거나 깊이가 없는 경우 기존 Median 기반 백업 로직 사용
         if ransac_pos_3d[2] == 0.0:
@@ -104,10 +156,10 @@ def detect_3d(model, color_image, depth_image, intrinsics):
         else:
             pos_3d = ransac_pos_3d
 
-        # 4) Yaw 추정: depth 마스크 + 윤곽선 기반
-        yaw = estimate_yaw_from_contour(color_image, depth_image, x1, y1, x2, y2)
+        # 3) OBB 회전 각도를 yaw로 직접 사용 (contour 기반보다 정확)
+        yaw = math.degrees(obb_angle_rad)
 
-        # 6) 접근 벡터 계산
+        # 4) 접근 벡터 계산
         approach = compute_approach_vector(
             pos_3d[0], pos_3d[1], pos_3d[2],
             roll, pitch, yaw,
@@ -121,7 +173,9 @@ def detect_3d(model, color_image, depth_image, intrinsics):
             pos_3d=pos_3d,
             orientation=(roll, pitch, yaw),
             approach=approach,
-            normal=normal
+            normal=normal,
+            obb_corners=corners,
+            obb_angle=math.degrees(obb_angle_rad)
         )
         objects.append(obj)
 
@@ -132,17 +186,27 @@ def detect_3d(model, color_image, depth_image, intrinsics):
 # 실시간 모드
 # =============================================================================
 
-def run_realtime():
+def run_realtime(device_choice=None):
     """
     실시간 3D 소켓 탐지 모드
 
     레퍼런스의 yolo_order.py 메인 루프에 해당하지만,
     ROS 없이 pyrealsense2로 직접 구현.
+
+    Args:
+        device_choice: "cpu", "openvino", "xpu" (None이면 자동 감지)
     """
-    # 모델 로드 (GPU)
-    print(f"YOLOv8 모델 로드: {MODEL_PATH} (device={DEVICE})")
-    model = YOLO(MODEL_PATH)
-    model.to(DEVICE)
+    import time
+    import torch
+
+    if device_choice is None:
+        device_choice = "xpu" if DEVICE.startswith("xpu") else DEVICE
+
+    # 모델 로드
+    model, device_str, device_label = load_model(device_choice)
+    print(f"YOLO11-OBB 모델 로드: {MODEL_PATH} (device={device_label})")
+
+    is_xpu = device_str.startswith("xpu") and hasattr(torch, 'xpu')
 
     # 시간축 스무딩 (칼만 필터 기반 노이즈 안정화)
     smoother = ObjectSmoother()
@@ -153,15 +217,18 @@ def run_realtime():
     save_count = 0
 
     print("=" * 60)
-    print("3D Socket Detection - Bin Picking System")
+    print(f"3D Socket Detection - [{device_label}]")
     print("=" * 60)
     print("  'q' = 종료  |  's' = 저장  |  'd' = 상세 출력")
     print("=" * 60)
 
-    import time
     fps_time = time.time()
     fps_count = 0
     fps_display = 0.0
+    pipeline_ms = 0.0
+
+    # 벤치마크 통계 수집
+    frame_times = []
 
     try:
         while True:
@@ -182,9 +249,20 @@ def run_realtime():
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
 
-            # 3D 탐지 + 칼만 필터 스무딩
-            raw_objects = detect_3d(model, color_image, depth_image, intrinsics)
+            # 3D 탐지 + 칼만 필터 스무딩 (시간 측정)
+            if is_xpu:
+                torch.xpu.synchronize()
+
+            t0 = time.perf_counter()
+            raw_objects = detect_3d(model, color_image, depth_image, intrinsics,
+                                   device=device_str)
             objects = smoother.smooth(raw_objects)
+
+            if is_xpu:
+                torch.xpu.synchronize()
+
+            pipeline_ms = (time.perf_counter() - t0) * 1000
+            frame_times.append(pipeline_ms)
 
             # 시각화
             display = draw_3d_detections(color_image, objects, intrinsics)
@@ -197,7 +275,11 @@ def run_realtime():
                 fps_display = fps_count / elapsed
                 fps_count = 0
                 fps_time = time.time()
-            cv2.putText(display, f"FPS: {fps_display:.1f} ({DEVICE})", (450, 30),
+
+            # 화면 상단에 FPS + pipeline ms 표시
+            info_text = (f"FPS: {fps_display:.1f} | "
+                         f"{pipeline_ms:.1f}ms | {device_label}")
+            cv2.putText(display, info_text, (10, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
             # depth 패널 높이를 RGB와 맞추기
@@ -207,7 +289,13 @@ def run_realtime():
                 )
 
             combined = np.hstack([display, depth_panel])
-            cv2.imshow("3D Socket Detection (RGB+3D | Depth Analysis)", combined)
+
+            # 화면 크기 축소 (75%)
+            disp_h, disp_w = combined.shape[:2]
+            scale = 0.75
+            combined = cv2.resize(combined,
+                                  (int(disp_w * scale), int(disp_h * scale)))
+            cv2.imshow("3D Socket Detection", combined)
 
             # 키 입력
             key = cv2.waitKey(1) & 0xFF
@@ -239,11 +327,68 @@ def run_realtime():
     except KeyboardInterrupt:
         pass
     except Exception as e:
+        import traceback
         print(f"\n[오류 발생] {e}")
+        traceback.print_exc()
     finally:
         pipeline.stop()
         cv2.destroyAllWindows()
-        print("종료.")
+
+        # ── 종료 시 벤치마크 통계 출력 ──
+        _print_and_save_stats(frame_times, device_label, device_choice)
+
+
+def _print_and_save_stats(frame_times, device_label, device_choice):
+    """종료 시 파이프라인 통계를 출력하고 JSON으로 저장합니다."""
+    if not frame_times:
+        print("종료. (측정된 프레임 없음)")
+        return
+
+    times_arr = np.array(frame_times)
+    # 처음 10프레임은 워밍업으로 제외 (있으면)
+    if len(times_arr) > 20:
+        stats_arr = times_arr[10:]
+    else:
+        stats_arr = times_arr
+
+    avg = float(np.mean(stats_arr))
+    med = float(np.median(stats_arr))
+    mn = float(np.min(stats_arr))
+    mx = float(np.max(stats_arr))
+    std = float(np.std(stats_arr))
+
+    print(f"\n{'='*55}")
+    print(f"  Pipeline 통계 [{device_label}] ({len(stats_arr)} frames)")
+    print(f"{'='*55}")
+    print(f"  평균:   {avg:>8.2f} ms  ({1000/avg:.1f} FPS)")
+    print(f"  중앙:   {med:>8.2f} ms")
+    print(f"  최소:   {mn:>8.2f} ms")
+    print(f"  최대:   {mx:>8.2f} ms")
+    print(f"  표준편차: {std:>8.2f} ms")
+    print(f"{'='*55}")
+
+    # JSON 저장
+    os.makedirs(BENCHMARK_DIR, exist_ok=True)
+    result = {
+        "device": device_label,
+        "benchmark_type": "live_pipeline",
+        "total_frames": len(times_arr),
+        "measured_frames": len(stats_arr),
+        "avg_ms": round(avg, 2),
+        "median_ms": round(med, 2),
+        "min_ms": round(mn, 2),
+        "max_ms": round(mx, 2),
+        "std_ms": round(std, 2),
+        "fps": round(1000 / avg, 1),
+        "timestamp": datetime.now().isoformat(),
+    }
+
+    filename = f"live_{device_choice}.json"
+    out_path = os.path.join(BENCHMARK_DIR, filename)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    print(f"  결과 저장: {out_path}")
+    print("종료.")
 
 
 # =============================================================================
@@ -260,7 +405,7 @@ def run_binpicking(simulation=True):
     Args:
         simulation: True=시뮬레이션 모드 (기본), False=실제 로봇 연결
     """
-    print(f"YOLOv8 모델 로드: {MODEL_PATH} (device={DEVICE})")
+    print(f"YOLO11-OBB 모델 로드: {MODEL_PATH} (device={DEVICE})")
     model = YOLO(MODEL_PATH)
     model.to(DEVICE)
 
@@ -500,47 +645,59 @@ def execute_pick_and_place(robot, target):
 # =============================================================================
 
 if __name__ == "__main__":
-    if "--pick" in sys.argv or "--detect" in sys.argv:
-        simulation = "--robot" not in sys.argv
+    parser = argparse.ArgumentParser(description="3D Bin-Picking Detection System")
+    parser.add_argument("--device", type=str, default=None,
+                        choices=["cpu", "openvino", "xpu"],
+                        help="추론 디바이스 (기본: 자동 감지)")
+    parser.add_argument("--pick", action="store_true",
+                        help="빈픽킹 모드")
+    parser.add_argument("--robot", action="store_true",
+                        help="실제 로봇 연결 (--pick과 함께 사용)")
+    parser.add_argument("--test", nargs="?", const="", default=None,
+                        help="단일 이미지 테스트 (경로 지정 가능)")
+    args = parser.parse_args()
+
+    if args.pick:
+        simulation = not args.robot
         run_binpicking(simulation=simulation)
-    elif "--test" in sys.argv:
-        # 카메라 없이 이미지로 테스트 (depth 없이 2D만)
-        print("테스트 모드: 단일 이미지 2D 탐지만 수행")
+    elif args.test is not None:
+        # 카메라 없이 이미지로 테스트 (depth 없이 2D OBB만)
+        print("테스트 모드: 단일 이미지 OBB 탐지만 수행")
         model = YOLO(MODEL_PATH)
         model.to(DEVICE)
-        if len(sys.argv) > sys.argv.index("--test") + 1:
-            img_path = sys.argv[sys.argv.index("--test") + 1]
-        else:
-            img_path = NEW_IMAGES_DIR
-            import glob
-            files = glob.glob(f"{img_path}/*.png")
-            if files:
-                img_path = files[0]
+        img_path = args.test
+        if not img_path or not os.path.isfile(img_path):
+            imgs = glob.glob(os.path.join(NEW_IMAGES_DIR, "*.png"))
+            if imgs:
+                img_path = imgs[0]
             else:
                 print("테스트할 이미지가 없습니다.")
                 sys.exit(1)
 
         image = cv2.imread(img_path)
         results = model(image, conf=CONFIDENCE, verbose=False, device=DEVICE)
-        boxes = results[0].boxes
-        print(f"\n탐지 결과 ({img_path}): {len(boxes)}개")
-        for i in range(len(boxes)):
-            cls_id = int(boxes.cls[i])
-            conf = float(boxes.conf[i])
-            print(f"  [{i}] {CLASS_NAMES.get(cls_id, cls_id)} {conf:.0%}")
+        obb = results[0].obb
+        n_det = len(obb) if obb is not None else 0
+        print(f"\n탐지 결과 ({img_path}): {n_det}개")
 
         display = image.copy()
-        for i in range(len(boxes)):
-            x1, y1, x2, y2 = map(int, boxes.xyxy[i].cpu().numpy())
-            cls_id = int(boxes.cls[i])
-            conf = float(boxes.conf[i])
-            color = COLORS.get(cls_id, (0, 255, 0))
-            cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(display, f"{CLASS_NAMES.get(cls_id, cls_id)} {conf:.0%}",
-                        (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        if obb is not None:
+            for i in range(len(obb)):
+                cls_id = int(obb.cls[i])
+                conf = float(obb.conf[i])
+                angle_deg = math.degrees(float(obb.xywhr[i][4].cpu()))
+                print(f"  [{i}] {CLASS_NAMES.get(cls_id, cls_id)} {conf:.0%} angle={angle_deg:.1f}°")
 
-        cv2.imshow("Test Detection", display)
+                # OBB 꼭짓점으로 회전 바운딩 박스 그리기
+                corners = obb.xyxyxyxy[i].cpu().numpy().reshape(4, 2).astype(int)
+                color = COLORS.get(cls_id, (0, 255, 0))
+                cv2.polylines(display, [corners], isClosed=True, color=color, thickness=2)
+                cv2.putText(display, f"{CLASS_NAMES.get(cls_id, cls_id)} {conf:.0%}",
+                            (corners[0][0], corners[0][1] - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        cv2.imshow("Test Detection (OBB)", display)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
     else:
-        run_realtime()
+        run_realtime(device_choice=args.device)
