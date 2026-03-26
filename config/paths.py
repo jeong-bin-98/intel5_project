@@ -29,11 +29,18 @@ YOLOV8N_PT = os.path.join(MODELS_DIR, "yolov8n.pt")
 
 # ===== YOLO 학습 결과 =====
 RUNS_DIR = os.path.join(PROJECT_ROOT, "runs")
-YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector3", "weights", "best.pt")
+YOLO_BEST_PT = os.path.join(RUNS_DIR, "detect", "socket_detector_obb4", "weights", "best.pt")
 
-# ===== OBB 라벨 디렉토리 =====
-DATASET_LABELS_OBB_TRAIN = os.path.join(DATASET_DIR, "labels_obb", "train")
-DATASET_LABELS_OBB_VAL = os.path.join(DATASET_DIR, "labels_obb", "val")
+# ===== OBB 데이터셋 (이미지는 심볼릭 링크, 라벨은 별도 저장) =====
+# YOLO는 이미지 경로의 /images/ → /labels/ 자동 치환으로 라벨을 찾으므로
+# dataset_obb/images/ + dataset_obb/labels/ 구조를 사용
+DATASET_OBB_DIR = os.path.join(DATA_DIR, "dataset_obb")
+DATASET_LABELS_OBB_TRAIN = os.path.join(DATASET_OBB_DIR, "labels", "train")
+DATASET_LABELS_OBB_VAL = os.path.join(DATASET_OBB_DIR, "labels", "val")
+DATASET_IMAGES_OBB_VAL = os.path.join(DATASET_OBB_DIR, "images", "val")
+
+# ===== 벤치마크 결과 =====
+BENCHMARK_DIR = os.path.join(RUNS_DIR, "benchmark")
 
 # ===== 설정 파일 =====
 DATASET_YAML = os.path.join(PROJECT_ROOT, "dataset.yaml")

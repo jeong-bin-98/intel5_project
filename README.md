@@ -29,7 +29,8 @@ Intel5/
 │   │   └── tests/                  # 단위 테스트
 │   │       ├── test_detect.py      # 실시간 탐지 테스트
 │   │       ├── test_3d_pose.py     # 3D 자세 추정 테스트
-│   │       └── test_fast_brisk.py  # BRISK 알고리즘 테스트
+│   │       ├── test_fast_brisk.py  # BRISK 알고리즘 테스트
+│   │       └── benchmark/          # 추론 속도 벤치마크 (CPU/OpenVINO/XPU)
 │   │
 │   ├── pipeline/                   # OBB 데이터 수집 & 학습 파이프라인
 │   │   ├── step1_capture.py        # D435 RGB+Depth 촬영

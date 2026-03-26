@@ -25,6 +25,7 @@ from config.paths import DATASET_OBB_DIR, DATASET_LABELS_OBB_TRAIN, DATASET_OBB_
 
 import shutil
 import random
+import time
 import torch
 from ultralytics import YOLO
 from ultralytics.utils import torch_utils
@@ -64,10 +65,23 @@ else:
     print("⚠️  XPU 없음 → CPU로 학습합니다 (느릴 수 있음)")
 
 
+def _delete_cache_files(labels_dir):
+    """labels 폴더 내 stale .cache 파일을 삭제합니다."""
+    parent = os.path.dirname(labels_dir)
+    for f in os.listdir(parent) if os.path.isdir(parent) else []:
+        if f.endswith(".cache"):
+            cache_path = os.path.join(parent, f)
+            os.remove(cache_path)
+            print(f"  stale cache 삭제: {cache_path}")
+
+
 def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
     """
     train 폴더에서 일부를 val 폴더로 자동 분리합니다.
-    (이미 val에 파일이 있으면 스킵)
+    라벨이 있는 이미지를 우선 분배하여 val에도 라벨이 반드시 포함되도록 합니다.
+
+    이미 val에 라벨이 있으면 스킵합니다.
+    val에 이미지만 있고 라벨이 없으면 재분배를 수행합니다.
 
     Args:
         train_img_dir: 학습 이미지 폴더
@@ -77,20 +91,52 @@ def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
     val_img_dir = train_img_dir.replace("/train", "/val")
     val_lbl_dir = train_lbl_dir.replace("/train", "/val")
 
-    # val 폴더에 이미 파일이 있으면 스킵
-    if os.path.exists(val_img_dir) and len(os.listdir(val_img_dir)) > 0:
-        print(f"val 폴더에 이미 {len(os.listdir(val_img_dir))}장 있음 → 분리 스킵")
-        return
-
     os.makedirs(val_img_dir, exist_ok=True)
     os.makedirs(val_lbl_dir, exist_ok=True)
 
-    # 학습 이미지 목록
-    images = [f for f in os.listdir(train_img_dir) if f.endswith('.png')]
-    random.shuffle(images)
+    # val에 라벨이 이미 있으면 스킵
+    val_labels = [f for f in os.listdir(val_lbl_dir) if f.endswith('.txt')]
+    if len(val_labels) > 0:
+        print(f"val 라벨 {len(val_labels)}개 확인 → 분리 스킵")
+        return
 
-    val_count = max(1, int(len(images) * val_ratio))
-    val_images = images[:val_count]
+    # val에 이미지만 있고 라벨이 없으면 → train으로 되돌린 후 재분배
+    val_existing_imgs = [f for f in os.listdir(val_img_dir) if f.endswith('.png')]
+    if len(val_existing_imgs) > 0:
+        print(f"val에 이미지 {len(val_existing_imgs)}장 있지만 라벨 0개 → 재분배 수행")
+        for img_name in val_existing_imgs:
+            src = os.path.join(val_img_dir, img_name)
+            dst = os.path.join(train_img_dir, img_name)
+            if not os.path.exists(dst):
+                shutil.move(src, dst)
+            else:
+                os.remove(src)
+
+    # stale cache 삭제
+    _delete_cache_files(train_lbl_dir)
+
+    # 라벨 있는 이미지 / 없는 이미지 분리
+    all_images = [f for f in os.listdir(train_img_dir) if f.endswith('.png')]
+    labeled = []
+    unlabeled = []
+    for img in all_images:
+        lbl = img.replace('.png', '.txt')
+        if os.path.exists(os.path.join(train_lbl_dir, lbl)):
+            labeled.append(img)
+        else:
+            unlabeled.append(img)
+
+    random.shuffle(labeled)
+    random.shuffle(unlabeled)
+
+    print(f"전체 이미지: {len(all_images)}장 (라벨 있음: {len(labeled)}, 없음: {len(unlabeled)})")
+
+    # 라벨 있는 이미지에서 val_ratio만큼 val로 분배 (최소 1장)
+    val_labeled_count = max(1, int(len(labeled) * val_ratio))
+    # 라벨 없는 이미지에서도 val_ratio만큼 val로 분배
+    val_unlabeled_count = int(len(unlabeled) * val_ratio)
+
+    val_images = labeled[:val_labeled_count] + unlabeled[:val_unlabeled_count]
 
     for img_name in val_images:
         lbl_name = img_name.replace('.png', '.txt')
@@ -100,12 +146,14 @@ def split_train_val(train_img_dir, train_lbl_dir, val_ratio=0.2):
             os.path.join(train_img_dir, img_name),
             os.path.join(val_img_dir, img_name)
         )
-        # 라벨 이동
+        # 라벨 이동 (있는 경우)
         lbl_src = os.path.join(train_lbl_dir, lbl_name)
         if os.path.exists(lbl_src):
             shutil.move(lbl_src, os.path.join(val_lbl_dir, lbl_name))
 
-    print(f"Train/Val 분리 완료: train {len(images) - val_count}장, val {val_count}장")
+    train_remaining = len(all_images) - len(val_images)
+    val_lbl_final = len([f for f in os.listdir(val_lbl_dir) if f.endswith('.txt')])
+    print(f"Train/Val 분리 완료: train {train_remaining}장, val {len(val_images)}장 (val 라벨: {val_lbl_final}개)")
 
 
 def train():
@@ -129,41 +177,94 @@ def train():
 
     # ===== YOLO11-OBB 학습 =====
     print("\n" + "=" * 50)
-    print("YOLO11n-OBB 학습 시작")
+    print("YOLO11s-OBB 학습 시작 (빈피킹 최적화)")
     print("=" * 50)
 
-    model = YOLO("yolo11n-obb.pt")  # 사전학습된 YOLO11 OBB (네오) 모델 자동 다운로드
+    model = YOLO("yolo11s-obb.pt")
+
+    # === 에폭별 남은 시간 표시 콜백 ===
+    train_start = time.time()
+
+    def _on_train_epoch_end(trainer):
+        epoch = trainer.epoch + 1
+        total_epochs = trainer.epochs
+        elapsed = time.time() - train_start
+        avg_per_epoch = elapsed / epoch
+        remaining = avg_per_epoch * (total_epochs - epoch)
+
+        def _fmt(s):
+            m, s = divmod(int(s), 60)
+            h, m = divmod(m, 60)
+            return f"{h}h {m}m {s}s" if h else f"{m}m {s}s"
+
+        print(f"  [{epoch}/{total_epochs}] 경과: {_fmt(elapsed)} | "
+              f"에폭당: {_fmt(avg_per_epoch)} | 남은 시간: {_fmt(remaining)}")
+
+    model.add_callback("on_train_epoch_end", _on_train_epoch_end)
 
     results = model.train(
         task="obb",             # OBB(회전 바운딩 박스) 모드 필수 설정
         data=DATASET_OBB_YAML,  # OBB 데이터셋 설정
         project=os.path.join(RUNS_DIR, "detect"),  # 결과 저장 위치
-        epochs=20,             # 최대 100 에폭 (early stopping으로 자동 종료됨)
-        imgsz=640,              # 이미지 크기
-        batch=8,                # 배치 크기 (GPU 메모리에 맞게 조절)
-        patience=30,            # 30 에폭 동안 개선 없으면 조기 종료
         device=DEVICE,          # Intel XPU 또는 CPU (자동 선택)
         amp=False,              # Intel XPU는 AMP CUDA 검사 우회 필요
         workers=0,              # XPU에서는 0 권장
         name="socket_detector_obb", # 결과 저장 폴더 이름 (OBB 명시)
 
-        # === 데이터 증강 ===
+        # === 학습 스케줄 ===
+        epochs=500,             # 최대 300 에폭 (early stopping으로 자동 종료)
+        patience=150,            # 50 에폭 동안 개선 없으면 조기 종료 (충분한 수렴 기회)
+        imgsz=640,              # 이미지 크기
+        batch=16,               # 배치 크기 (Arc A770 16GB VRAM 활용)
+
+        # === 옵티마이저 (소규모 데이터셋 + 정밀 OBB에 AdamW 적합) ===
+        optimizer="AdamW",
+        lr0=0.001,              # AdamW 초기 학습률
+        lrf=0.01,               # 최종 학습률 비율 (lr0 * lrf)
+        weight_decay=0.0005,    # 과적합 방지
+        warmup_epochs=5,        # 안정적 학습 시작을 위한 웜업
+        warmup_momentum=0.8,
+        cos_lr=True,            # 코사인 학습률 스케줄 (안정적 수렴)
+
+        # === 손실 가중치 (빈피킹: 위치/각도 정밀도 > 분류) ===
+        box=10.0,               # 박스 회귀 가중치 ↑ (OBB 위치+각도 정밀도 강화)
+        cls=0.5,                # 분류 가중치 (2클래스라 기본값 충분)
+        dfl=1.5,                # 분포 초점 손실 (기본값)
+
+        # === 정규화 ===
+        label_smoothing=0.05,   # 과신 방지 (소규모 데이터셋에 효과적)
+
+        # === 데이터 증강 (빈피킹 환경 최적화) ===
         augment=True,
-        hsv_h=0.015,            # 색상 변동
-        hsv_s=0.7,              # 채도 변동
-        hsv_v=0.4,              # 밝기 변동
-        degrees=180,            # 회전 (OBB에서는 각도 학습을 위해 180도 회전 증강이 핵심입니다)
-        translate=0.1,          # 평행 이동
-        scale=0.3,              # 크기 변동
+        # 색상/조명: 산업용 조명 환경 변동 대응
+        hsv_h=0.015,            # 색상 변동 (플라스틱 색상 일관적 → 소폭)
+        hsv_s=0.5,              # 채도 변동 (산업 조명 하 적당히)
+        hsv_v=0.4,              # 밝기 변동 (빈 내부 그림자/반사 대응)
+        # 기하학적 변환: 빈 피킹 핵심 — 임의 자세 대응
+        degrees=180,            # 360° 회전 (OBB 각도 학습의 핵심, 빈 내 임의 방향)
+        translate=0.15,         # 평행 이동 (빈 내 다양한 위치)
+        scale=0.4,              # 크기 변동 ↑ (빈 내 깊이 차이로 크기 변화 큼)
+        shear=2.0,              # 전단 변형 (약간의 시점 변화 시뮬레이션)
+        perspective=0.001,      # 원근 변형 (빈 내 깊이에 따른 왜곡)
+        # 반전: 빈 피킹에서 상하좌우 무관
         flipud=0.5,             # 상하 반전
         fliplr=0.5,             # 좌우 반전
-        mosaic=0.5,             # 모자이크 증강
-        mixup=0.0,              # 믹스업 증강
+        # 합성 증강: 다수 객체 겹침 시뮬레이션
+        mosaic=1.0,             # 모자이크 ↑ (빈 내 다수 소켓 밀집 환경 학습)
+        close_mosaic=20,        # 마지막 20에폭은 모자이크 off (정밀 미세조정)
+        mixup=0.1,              # 약간의 믹스업 (겹침/반투명 소켓 대응)
+        copy_paste=0.2,         # 복사-붙여넣기 (빈 내 소켓 겹침 시뮬레이션)
+        erasing=0.3,            # 랜덤 지우기 (부분 가림/겹침 강건성)
     )
 
     # ===== 결과 확인 =====
+    elapsed = time.time() - train_start
+    minutes, seconds = divmod(int(elapsed), 60)
+    hours, minutes = divmod(minutes, 60)
+
     print("\n" + "=" * 50)
     print("학습 완료!")
+    print(f"총 학습 시간: {hours}시간 {minutes}분 {seconds}초")
     print("=" * 50)
     print(f"최적 모델: runs/detect/socket_detector_obb/weights/best.pt")
     print(f"학습 로그: runs/detect/socket_detector_obb/results.csv")
